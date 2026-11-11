@@ -53,6 +53,24 @@ jobs:
           platform/linux/build.sh
           node scripts/fake-peer-config.mjs /tmp/raft-adapter-fake.json
           RAFT_ADAPTER_CONFIG=/tmp/raft-adapter-fake.json MOCK_STATE_FILE=/tmp/raft-adapter-fake-sessions.json node scripts/smoke.mjs --launcher
+          node scripts/fake-peer-config.mjs /tmp/raft-adapter-fake-dsh.json --backend dsh
+          RAFT_ADAPTER_CONFIG=/tmp/raft-adapter-fake-dsh.json MOCK_STATE_FILE=/tmp/raft-adapter-fake-dsh-sessions.json RAFT_ADAPTER_LOCAL=/tmp/raft-adapter-fake-dsh-local node scripts/smoke.mjs --launcher
+          RAFT_ADAPTER_CONFIG=/tmp/raft-adapter-fake-dsh.json MOCK_STATE_FILE=/tmp/raft-adapter-fake-dsh-sessions.json RAFT_ADAPTER_LOCAL=/tmp/raft-adapter-fake-dsh-local node docker/probe.mjs
+      - name: Smoke-test Linux install, PATH launch, and uninstall cycle
+        if: runner.os == 'Linux'
+        run: |
+          case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
+          platform/linux/install.sh >/dev/null
+          resolved=$(command -v grok || true)
+          [ "$resolved" = "$HOME/.local/bin/grok" ] || { echo "grok resolves to '${resolved:-nothing}', expected $HOME/.local/bin/grok." >&2; exit 1; }
+          grok --version
+          RAFT_ADAPTER_CONFIG=/tmp/raft-adapter-fake.json MOCK_STATE_FILE=/tmp/raft-adapter-fake-sessions.json node docker/probe.mjs --via-path --expect-models
+          platform/linux/uninstall.sh >/dev/null
+          hash -r 2>/dev/null || true
+          if [ -e "$HOME/.local/bin/grok" ] || command -v grok >/dev/null 2>&1; then echo 'uninstall left grok on PATH.' >&2; exit 1; fi
+          platform/linux/install.sh >/dev/null
+          resolved=$(command -v grok || true)
+          [ "$resolved" = "$HOME/.local/bin/grok" ] || { echo "grok does not resolve to this checkout after reinstalling." >&2; exit 1; }
   docker:
     runs-on: ubuntu-latest
     steps:
