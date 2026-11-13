@@ -48,7 +48,10 @@ function persist() {
   try {
     let env = spawnEnv;
     try { env = { ...spawnEnv, ...JSON.parse(fs.readFileSync(process.env.MOCK_STATE_FILE, 'utf8')).env }; } catch { /* first write */ }
-    fs.writeFileSync(process.env.MOCK_STATE_FILE, JSON.stringify({ env, sessions: [...sessions.entries()], calls }));
+    // Atomic write: test readers must never observe a truncated file.
+    const temp = process.env.MOCK_STATE_FILE + '.' + process.pid + '.tmp';
+    fs.writeFileSync(temp, JSON.stringify({ env, sessions: [...sessions.entries()], calls }));
+    fs.renameSync(temp, process.env.MOCK_STATE_FILE);
   } catch { /* best effort */ }
 }
 const record = (method, extra = {}) => { calls.push({ pid: process.pid, method, ...extra }); persist(); };

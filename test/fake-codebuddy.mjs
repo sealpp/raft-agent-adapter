@@ -34,7 +34,10 @@ if (process.env.MOCK_STATE_FILE && fs.existsSync(process.env.MOCK_STATE_FILE)) {
 }
 function persist() {
   if (!process.env.MOCK_STATE_FILE) return;
-  fs.writeFileSync(process.env.MOCK_STATE_FILE, JSON.stringify({ sessions: [...sessions.entries()], calls }));
+  // Atomic write: test readers must never observe a truncated file.
+  const temp = process.env.MOCK_STATE_FILE + '.' + process.pid + '.tmp';
+  fs.writeFileSync(temp, JSON.stringify({ sessions: [...sessions.entries()], calls }));
+  fs.renameSync(temp, process.env.MOCK_STATE_FILE);
 }
 const record = (method, extra = {}) => { calls.push({ method, ...extra }); persist(); };
 const rpcError = (message, code) => Object.assign(new Error(message), { code });

@@ -19,7 +19,14 @@ function config(session) {
     { id: 'thought_level', ...category('thought_level'), currentValue: session.effort, options: efforts.map(value => ({ value, name: value })) }
   ] };
 }
-function persist() { if (process.env.MOCK_STATE_FILE) fs.writeFileSync(process.env.MOCK_STATE_FILE, JSON.stringify([...sessions])); }
+function persist() {
+  if (process.env.MOCK_STATE_FILE) {
+    // Atomic write: test readers must never observe a truncated file.
+    const temp = process.env.MOCK_STATE_FILE + '.' + process.pid + '.tmp';
+    fs.writeFileSync(temp, JSON.stringify([...sessions]));
+    fs.renameSync(temp, process.env.MOCK_STATE_FILE);
+  }
+}
 async function handle(method, params) {
   if (method === 'initialize') return { protocolVersion: 1, agentCapabilities: { loadSession: true, _meta: { 'cognition.ai/midTurnPrompts': process.env.MOCK_NO_MID_TURN !== '1' } } };
   if (method === 'authenticate') return {};
