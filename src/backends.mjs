@@ -29,6 +29,8 @@ function modelEntriesOf(options) {
 const base = {
   agentLabel(name) { return `${this.displayName} · ${name}`; },
   modelEntries(result, option) { return modelEntriesOf(option(result, 'model')?.options); },
+  // Backends may need a different client identity than the one Raft sends.
+  initializeParams(params) { return params; },
   // Release for the unclaimed primed session and Raft-closed sessions.
   closeMethods: ['session/delete', 'session/close'],
 };
@@ -126,6 +128,16 @@ export const backends = {
       if (caps?.loadSession !== true) throw new Error('CodeBuddy no longer advertises session loading; refusing an incompatible launch');
       return caps;
     },
+    // CodeBuddy's Web UI client path is the one that routes concurrent
+    // connections/sessions. The ordinary ACP client path keeps a single
+    // current session per process, which is why the adapter never opens two
+    // sessions on one adapter connection.
+    initializeParams(params) {
+      return {
+        ...params,
+        clientInfo: { ...(params.clientInfo ?? {}), name: 'codebuddy-web-ui' }
+      };
+    },
     usageOf(update) {
       const raw = update._meta?.usage;
       const key = update._meta?.['codebuddy.ai/requestId'] ?? update._meta?.['codebuddy.ai/messageId'];
@@ -133,7 +145,12 @@ export const backends = {
       const usage = { inputTokens: raw.prompt_tokens, outputTokens: raw.completion_tokens, totalTokens: raw.total_tokens ?? raw.prompt_tokens + raw.completion_tokens };
       return { key, usage };
     },
-    resumeParams: params => params,
+    // Suppress history replay: the adapter already has the Raft-side history,
+    // and replaying it would duplicate messages after an idle restart.
+    resumeParams: params => ({
+      ...params,
+      _meta: { ...(params._meta ?? {}), 'codebuddy.ai/suppressReplay': true }
+    }),
   },
 };
 
@@ -150,14 +167,37 @@ export function readBackendState(dir, backendId) {
   return null;
 }
 
+// Raft starts one adapter process per agent, so writes to the shared state
+// files below can land at the same instant. A fixed ".tmp" name made the
+// losers of that race fail with ENOENT after the winner renamed it, which
+// surfaced as a failed agent handshake. Each writer gets its own temp file;
+// rename is the only step that is shared, and it is atomic.
+let tempSequence = 0;
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${++tempSequence}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2));
+  try { fs.renameSync(temp, file); }
+  catch (error) { try { fs.unlinkSync(temp); } catch { /* best effort */ } throw error; }
+}
+
 export function writeBackendState(dir, backendId, entry) {
   const file = backendStatePath(dir);
   let parsed = {};
   try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* fresh */ }
-  parsed[backendId] = entry;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + '.tmp', JSON.stringify(parsed, null, 2));
-  fs.renameSync(file + '.tmp', file);
+  writeJsonAtomic(file, { ...parsed, [backendId]: entry });
+}
+
+// Clears the persisted primed session only if it is still the one this process
+// consumed. Several agents share one state file; an unconditional clear would
+// drop a session another agent just persisted and force an extra resume.
+export function clearPrimedSession(dir, backendId, sessionId) {
+  const file = backendStatePath(dir);
+  let parsed = {};
+  try { parsed = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* fresh */ }
+  const entry = parsed?.[backendId];
+  if (!entry || entry.primedSessionId !== sessionId) return;
+  writeJsonAtomic(file, { ...parsed, [backendId]: { ...entry, primedSessionId: null } });
 }
 
 // A successful backend initialize response plus the session config options is
@@ -212,9 +252,7 @@ export function writeInitializeCache(dir, backendId, key, entry) {
     if (current?.schema === 1) parsed = current;
   } catch { /* fresh */ }
   parsed[backendId] = { ...entry, key, writtenAt: new Date().toISOString() };
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file + '.tmp', JSON.stringify(parsed, null, 2));
-  fs.renameSync(file + '.tmp', file);
+  writeJsonAtomic(file, parsed);
 }
 
 export function invalidateInitializeCache(dir, backendId) {
@@ -226,4 +264,45 @@ export function invalidateInitializeCache(dir, backendId) {
     fs.writeFileSync(file + '.tmp', JSON.stringify(parsed, null, 2));
     fs.renameSync(file + '.tmp', file);
   } catch { /* absent or corrupt cache needs no invalidation */ }
+}
+
+// Cross-process gate around the one live handshake that fills the cache. Probe
+// processes that start together (startup, model refresh, after an upgrade
+// invalidates every key) would otherwise each spawn a full coding agent.
+// Returns a release function when this process owns the gate, null when another
+// process is working or the gate timed out.
+function initializeLockPath(dir, backendId) {
+  return path.join(dir, 'locks', `${backendId}-initialize`);
+}
+
+function lockIsStale(lock) {
+  let age;
+  try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch { return true; }
+  if (age > 120000) return true;
+  // The owner writes its pid right after mkdir; a missing file means the
+  // creator is still inside that window, not that the gate is abandoned.
+  let raw;
+  try { raw = fs.readFileSync(path.join(lock, 'pid'), 'utf8').trim(); } catch { return false; }
+  const pid = Number(raw);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error.code === 'ESRCH'; }
+}
+
+export function tryInitializeLock(dir, backendId) {
+  const lock = initializeLockPath(dir, backendId);
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.mkdirSync(lock);
+      try { fs.writeFileSync(path.join(lock, 'pid'), String(process.pid)); } catch { /* liveness check degrades to the age check */ }
+      return () => { try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* already released */ } };
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      // A probe killed mid-handshake leaves the directory behind.
+      if (!lockIsStale(lock)) return null;
+      try { fs.rmSync(lock, { recursive: true, force: true }); } catch { return null; }
+    }
+  }
+  return null;
 }

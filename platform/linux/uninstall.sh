@@ -15,4 +15,10 @@ if [ -f "$LINK" ] && grep -qF "$ROOT/bin/grok" "$LINK" 2>/dev/null; then
 else
   echo "No grok entry for this checkout was found under $BIN_DIR; nothing removed."
 fi
+GROK_BIN=${GROK_HOME:-"$HOME/.grok"}/bin
+GROK_LINK="$GROK_BIN/grok"
+if [ -L "$GROK_LINK" ] && [ "$(readlink -f -- "$GROK_LINK" 2>/dev/null || true)" = "$(readlink -f -- "$LINK" 2>/dev/null || true)" ]; then
+  rm -f -- "$GROK_LINK"
+fi
+
 echo "Restart Raft Computer or rescan runtimes so the Grok Build slot updates."

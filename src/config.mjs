@@ -119,11 +119,17 @@ export function loadConfig() {
     ? argOverride : defaultArgs[backendId];
   // A resolved .js entry (dsh's npm lib/bin.js) runs under the recorded Node.
   const viaNode = executable.endsWith('.js');
+  // CodeBuddy's Web UI client path supports several concurrent connections in
+  // one server. A per-host daemon owns that one server and each lightweight
+  // adapter attaches its own connection/session. RAFT_ADAPTER_HTTP=0 keeps the
+  // stdio fallback for debugging.
+  const http = backendId === 'codebuddy' && process.env.RAFT_ADAPTER_HTTP !== '0';
   return {
     backendId,
     executable,
     spawn: viaNode ? { command: nodeExecutable(), args: [path.resolve(executable), ...args] } : { command: path.resolve(executable), args },
     proxyUrl,
+    http,
     defaultModel: local.defaultModel || null,
     catalogPath: path.join(localDir(), 'model-catalog.json')
   };

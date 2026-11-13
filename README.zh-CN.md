@@ -24,6 +24,8 @@ flowchart LR
 
 - 后端模型进入 Raft 模型列表（`Devin · …` / `DSH · …` / `CodeBuddy · …`），各自带原生思考档位
 - 模型与思考强度是 Raft 里两个独立控件——适配器负责映射成后端原生配置
+- CodeBuddy HTTP ACP：每个 agent 一个轻量 adapter 进程，共享每主机一个 CodeBuddy 后端；每个 agent 独立 connection/session，可并发运行；最后一个 adapter 退出后后端停止，下次请求再恢复会话
+- 共享后端调研与进程模型见 [docs/codebuddy-shared-backend.md](docs/codebuddy-shared-backend.md)
 - 同机原生会话续接，不把历史重放进 Raft
 - 常驻指令、权限请求、流式更新、用量数据双向透传
 - 中途消息：Devin 原生投递；dsh 与 CodeBuddy 排队到当前轮结束后补发
@@ -34,7 +36,7 @@ flowchart LR
 | 后端 | 实测内容 | 验证环境 |
 | --- | --- | --- |
 | Devin CLI | 真实 prompt → 真实推理回复 | Linux，Raft Computer 1.0.67 → Devin CLI 3000.12.32（早于多后端重构） |
-| CodeBuddy Code | prompt + 模型/思考选择 + 会话续接 | CodeBuddy 2.179.3，国内版已登录账号 |
+| CodeBuddy Code | prompt + 模型/思考选择 + 会话续接；单后端 5 个并发会话 | CodeBuddy 2.182.0，国内版已登录账号 |
 | DeepSeek Harness | 尚未对真实 `dsh` 二进制验证 | 仅离线协议套件 |
 
 Windows 推理、权限请求与在途消息边界情况尚未验证——按实验性软件对待。
@@ -101,6 +103,8 @@ Raft 展示的是**家族**模型 ID（`devin:swe-2`），档位由独立的推�
 | 后端程序路径 | `DEVIN_EXE` / `DSH_EXE` / `CODEBUDDY_EXE` → 配置文件 → 标准路径 → PATH |
 | 代理 | `RAFT_ADAPTER_PROXY` → 配置文件 → 继承环境变量 |
 | 配置文件 | `RAFT_ADAPTER_CONFIG` → 检出目录的 `adapter.config.json` |
+| HTTP ACP 传输 | 仅 CodeBuddy，默认开启。每主机一个 daemon 持有单个 loopback 后端，每个 agent 独立 connection/session。`RAFT_ADAPTER_HTTP=0` 回退 stdio |
+| HTTP 空闲停止 | 仅 CodeBuddy，默认 5 分钟。空闲 adapter 断开连接，最后一个客户端退出后共享后端停止；下次请求重启并恢复会话。`RAFT_ADAPTER_HTTP_IDLE_MS=0` 保持常驻 |
 
 显式代理只为**后端子进程**设置 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`——不启动代理服务，也不改动系统代理。
 

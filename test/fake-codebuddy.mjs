@@ -7,6 +7,11 @@
 import fs from 'node:fs';
 import { createInterface } from 'node:readline';
 
+// Records one line per backend process so tests can prove that several
+// adapter processes share a single backend instead of each spawning one.
+if (process.env.MOCK_SPAWN_LOG) {
+  try { fs.appendFileSync(process.env.MOCK_SPAWN_LOG, process.pid + '\n'); } catch { /* best effort */ }
+}
 const send = message => process.stdout.write(JSON.stringify(message) + '\n');
 const notify = (sessionId, text) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } } } });
 const usageUpdate = (sessionId, meta) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'usage_update', used: 0, size: 960000, ...(meta ? { _meta: meta } : {}) } } });

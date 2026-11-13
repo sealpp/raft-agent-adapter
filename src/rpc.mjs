@@ -12,7 +12,10 @@ export class Rpc {
     this.child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], ...options });
     this.child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-20000); });
     this.child.on('error', error => this.fail(error));
-    this.child.on('exit', (code, signal) => this.fail(new Error(`RPC child exited (${code}, ${signal}) ${this.stderr.slice(-2000)}`)));
+    this.child.on('exit', (code, signal) => {
+      this.fail(new Error(`RPC child exited (${code}, ${signal}) ${this.stderr.slice(-2000)}`));
+      this.onExit?.();
+    });
     this.lines = createInterface({ input: this.child.stdout });
     this.lines.on('line', line => {
       let message;
@@ -28,6 +31,8 @@ export class Rpc {
         }
         return;
       }
+      // A multiplexer routes responses it forwarded under its own ids.
+      this.onResponse?.(message);
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
@@ -39,6 +44,10 @@ export class Rpc {
     });
   }
   send(message) { if (!this.child.stdin.destroyed) this.child.stdin.write(JSON.stringify(message) + '\n'); }
+  // The host is not draining. Stopping the backend's stdout lets its pipe fill
+  // so it throttles itself, instead of this process buffering every token.
+  pause() { if (!this.child.stdout.destroyed) this.child.stdout.pause(); }
+  resume() { if (!this.child.stdout.destroyed) this.child.stdout.resume(); }
   request(method, params, timeout = 60000) {
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {

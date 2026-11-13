@@ -16,8 +16,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/adapter.test.mjs test/adapter-dsh.test.mjs test/adapter-codebuddy.test.mjs",
-    "check": "node --check src/adapter.mjs && node --check src/config.mjs && node --check src/rpc.mjs && node --check src/model-config.mjs && node --check src/backends.mjs",
+    "test": "node --test test/adapter.test.mjs test/adapter-dsh.test.mjs test/adapter-codebuddy.test.mjs test/adapter-http.test.mjs test/adapter-backpressure.test.mjs test/session-identity.test.mjs",
+    "check": "node --check src/adapter.mjs && node --check src/config.mjs && node --check src/rpc.mjs && node --check src/model-config.mjs && node --check src/backends.mjs && node --check src/http-rpc.mjs && node --check src/http-shared.mjs && node --check src/http-daemon.mjs && node --check src/session-identity.mjs && node --check src/cli-dispatcher.mjs",
     "smoke": "node scripts/smoke.mjs",
     "models:refresh": "node scripts/refresh-models.mjs",
     "test:live": "node scripts/test-live.mjs"

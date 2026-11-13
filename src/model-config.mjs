@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { createHash } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 // Values accepted by Raft's Grok model parser. Devin's "none" is represented
 // by Raft's Default choice when it is the native model default.
@@ -21,6 +22,47 @@ export function catalogKey(executable, models) {
     binary: { size: stat.size, modified: stat.mtimeMs },
     models
   })).digest('hex');
+}
+
+// The catalog is maintained from live sessions as well as by models:refresh, so
+// a backend upgrade no longer discards thinking metadata for every model. It
+// records the offered model list (entries) alongside the options discovered so
+// far; refresh is only needed for models no session has selected yet.
+let catalogSequence = 0;
+
+export function readCatalog(file) {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+export function writeCatalog(file, catalog) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const temp = `${file}.${process.pid}.${++catalogSequence}.tmp`;
+  writeFileSync(temp, JSON.stringify(catalog, null, 2));
+  try { renameSync(temp, file); }
+  catch (error) { try { unlinkSync(temp); } catch { /* best effort */ } throw error; }
+}
+
+// Keeps what earlier sessions discovered for models the backend still offers,
+// refreshes the current model's options, and drops models that are gone.
+export function mergeCatalog(previous, { backendId, key, entries, current }) {
+  const known = previous?.backend === backendId && previous?.models ? previous.models : {};
+  const offered = new Set(entries.map(entry => entry.value));
+  const models = {};
+  for (const [id, info] of Object.entries(known)) {
+    if (offered.has(id) && Array.isArray(info?.efforts) && info.efforts.length) models[id] = info;
+  }
+  if (current?.value && current.efforts?.length) {
+    const prior = models[current.value] ?? known[current.value];
+    const defaultEffort = current.defaultEffort ?? prior?.defaultEffort;
+    models[current.value] = { efforts: current.efforts, ...(defaultEffort ? { defaultEffort } : {}) };
+  }
+  return { schema: 2, backend: backendId, key, entries, models };
+}
+
+export function sameCatalog(a, b) {
+  return Boolean(a) && a.schema === 2 && a.backend === b.backend && a.key === b.key
+    && JSON.stringify(a.entries) === JSON.stringify(b.entries)
+    && JSON.stringify(a.models) === JSON.stringify(b.models);
 }
 
 export function reasoningMeta(info) {

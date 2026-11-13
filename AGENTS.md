@@ -26,7 +26,7 @@ Failures: `Another grok exists` means another checkout owns the slot — run its
 
 ## Layout
 
-- `src/`: the ACP adapter (`adapter.mjs`, `backends.mjs`, `model-config.mjs`, `config.mjs`, `rpc.mjs`).
+- `src/`: the ACP adapter (`adapter.mjs`, `backends.mjs`, `model-config.mjs`, `config.mjs`, `rpc.mjs`, `http-rpc.mjs`, `http-shared.mjs`, `http-daemon.mjs`). For CodeBuddy, `http-daemon.mjs` owns one shared loopback HTTP ACP server and every adapter process attaches its own connection/session through CodeBuddy's Web UI client path; `RAFT_ADAPTER_HTTP=0` falls back to stdio, and `RAFT_ADAPTER_HTTP_IDLE_MS` (default 300000) detaches idle adapters and stops the shared backend after the last client.
 - `test/`: offline protocol tests against deterministic fake peers.
 - `scripts/`: model catalog refresh, live smoke test, and fake-peer configuration.
 - `platform/`: Windows and Linux launchers, install, uninstall, and test scripts.

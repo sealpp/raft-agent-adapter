@@ -77,7 +77,22 @@ exec "$TARGET" "\$@"
 EOF
 chmod +x "$LINK"
 
-echo "Installed the adapter as $LINK."
+# Raft also probes ~/.grok/bin/grok directly, independent of the daemon's
+# PATH. Link that well-known candidate to the same trampoline so runtime
+# detection does not depend on how Raft Computer was started.
+GROK_BIN=${GROK_HOME:-"$HOME/.grok"}/bin
+GROK_LINK="$GROK_BIN/grok"
+mkdir -p "$GROK_BIN"
+if [ -e "$GROK_LINK" ] || [ -L "$GROK_LINK" ]; then
+  if [ "$(readlink -f -- "$GROK_LINK")" != "$(readlink -f -- "$LINK")" ]; then
+    echo "Another grok exists at $GROK_LINK. Only one grok can own this slot: remove it, or run the other adapter checkout's uninstall.sh." >&2
+    exit 1
+  fi
+else
+  ln -s -- "$LINK" "$GROK_LINK"
+fi
+
+echo "Installed the adapter as $LINK (and $GROK_LINK)."
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) echo "Note: $BIN_DIR is not on this shell's PATH. Raft's POSIX discovery also checks ~/.local/bin directly, but prefer adding $BIN_DIR to PATH." >&2 ;;

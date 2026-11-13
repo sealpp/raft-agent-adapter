@@ -24,6 +24,8 @@ flowchart LR
 
 - Backend models in Raft's picker (`Devin · …` / `DSH · …` / `CodeBuddy · …`), each with its native thinking levels
 - Model + thinking level as two independent Raft controls — the adapter maps them to the backend's native configuration
+- HTTP ACP transport for CodeBuddy: one lightweight adapter per agent shares a single per-host CodeBuddy server. Each agent gets its own ACP connection and session on CodeBuddy's Web UI client path, so several agents run concurrently without one heavy process each. When the last adapter detaches, the shared backend stops and resumes sessions on the next message
+- See [the shared-backend notes](docs/codebuddy-shared-backend.md) for the measured CodeBuddy behavior, process model, and limits
 - Native session resume on the same computer, without replaying history into Raft
 - Standing instructions, permission requests, streaming, and usage data forwarded both ways
 - Mid-turn messages: delivered natively on Devin, queued until the current turn ends on dsh and CodeBuddy
@@ -34,7 +36,7 @@ flowchart LR
 | Backend | Live check | Verified on |
 | --- | --- | --- |
 | Devin CLI | Real prompt → real inference reply | Linux, Raft Computer 1.0.67 → Devin CLI 3000.12.32 (predates the multi-backend refactor) |
-| CodeBuddy Code | Prompt + model/thinking selection + session resume | CodeBuddy 2.179.3, signed-in China-site account |
+| CodeBuddy Code | Prompt + model/thinking selection + session resume; five concurrent sessions on one shared backend | CodeBuddy 2.182.0, signed-in China-site account |
 | DeepSeek Harness | Not yet run against a real `dsh` binary | Offline protocol suite only |
 
 Windows inference, permission prompts, and mid-turn edge cases remain unverified — treat as experimental.
@@ -61,7 +63,7 @@ git clone https://github.com/sealpp/raft-agent-adapter.git; cd raft-agent-adapte
 .\platform\windows\Test-Adapter.ps1
 ```
 
-The installer places a `grok` trampoline where Raft looks for it; the refresh/test scripts read model and thinking options without sending an inference prompt. `Another grok exists` means another checkout owns the slot — run its uninstaller first. A blocked PowerShell script can be run once with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File …`.
+The installer places a `grok` trampoline in `~/.local/bin` and links it from `~/.grok/bin` (a path Raft probes directly, even when `~/.local/bin` is not on the daemon's PATH); the refresh/test scripts read model and thinking options without sending an inference prompt. `Another grok exists` means another checkout owns the slot — run its uninstaller first. A blocked PowerShell script can be run once with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File …`.
 
 Then in Raft: add an **internal agent → Grok Build → refresh the model list → pick a backend-prefixed model**. If Grok Build is missing from the runtime inventory, rescan runtimes or restart the Computer (the workspace **Scan** action does not rescan runtimes).
 
@@ -101,6 +103,8 @@ All optional — sensible defaults discover each backend at its standard install
 | Backend executable | `DEVIN_EXE` / `DSH_EXE` / `CODEBUDDY_EXE` → config → standard path → PATH |
 | Proxy | `RAFT_ADAPTER_PROXY` → config → inherited environment |
 | Config file | `RAFT_ADAPTER_CONFIG` → checkout's `adapter.config.json` |
+| HTTP ACP transport | CodeBuddy only, on by default. A per-host daemon owns one loopback server; every agent opens its own connection/session. Set `RAFT_ADAPTER_HTTP=0` to use stdio |
+| HTTP idle stop | CodeBuddy only; default 5 minutes. Idle adapters detach and the shared backend stops after the last client; the next prompt restarts it and resumes each session. Set `RAFT_ADAPTER_HTTP_IDLE_MS=0` to keep it warm |
 
 An explicit proxy sets `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` on the backend child process only — it starts no proxy server and changes nothing system-wide.
 
