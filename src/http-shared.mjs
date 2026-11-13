@@ -10,13 +10,26 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { localDir, projectRoot } from './config.mjs';
-import { tryInitializeLock } from './backends.mjs';
+import { tryInitializeLock, initializeCacheKey } from './backends.mjs';
 
 const START_TIMEOUT_MS = 60000;
 const CONNECT_TIMEOUT_MS = 5000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Stop a daemon and everything it spawned. Windows has no SIGTERM delivery:
+// process.kill(pid, 'SIGTERM') is TerminateProcess, which skips the daemon's
+// cleanup and orphans the backend child (which then keeps its cwd locked).
+// taskkill /T ends the whole tree instead; POSIX keeps SIGTERM so the daemon
+// can shut the backend down gracefully.
+function killDaemonTree(pid) {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+}
 
 export function backendStatePath(dir = localDir()) {
   return path.join(dir, 'http-backend.json');
@@ -92,14 +105,50 @@ export function connectDaemon({ timeout = CONNECT_TIMEOUT_MS, dir = localDir() }
   });
 }
 
-function spawnDaemon({ env, cwd }) {
-  fs.mkdirSync(path.dirname(daemonLogPath()), { recursive: true });
-  const log = fs.openSync(daemonLogPath(), 'a');
+// What a daemon must be running to serve this adapter: the backend and the
+// exact executable/arguments. Adapters share one daemon, but only while their
+// configuration matches; a daemon started for another executable (or another
+// checkout with a different build) must not answer this adapter's initialize
+// probes, or its model list would be cached under this adapter's key.
+export function httpIdentity(config) {
+  const key = initializeCacheKey(config);
+  return createHash('sha256').update(JSON.stringify({
+    backendId: config.backendId,
+    key: key ?? { command: config.spawn.command, args: config.spawn.args }
+  })).digest('hex').slice(0, 16);
+}
+
+// Attach to the running daemon, but only when it runs the same backend
+// configuration as this adapter. The daemon publishes its identity in the
+// state file; a mismatch means another adapter started it for a different
+// executable. Returns null on mismatch so the caller can replace it. A daemon
+// without a published identity (older build) is replaced as well.
+async function attachMatching({ identity, timeout, dir }) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    let attached;
+    try {
+      attached = await connectDaemon({ timeout: Math.min(CONNECT_TIMEOUT_MS, Math.max(1, deadline - Date.now())), dir });
+    } catch { return null; }
+    const state = readBackendState(dir);
+    // A daemon that publishes no identity predates this check; keep using it.
+    if (state?.port === attached.port && (!state.identity || state.identity === identity)) return { ...attached, state };
+    detachDaemon(attached.socket);
+    if (Date.now() >= deadline) return null;
+    await sleep(100);
+  }
+}
+
+function spawnDaemon({ env, cwd, identity, dir }) {
+  fs.mkdirSync(path.dirname(daemonLogPath(dir)), { recursive: true });
+  const log = fs.openSync(daemonLogPath(dir), 'a');
   let child;
   try {
     child = spawn(process.execPath, [path.join(projectRoot, 'src', 'http-daemon.mjs')], {
       cwd: cwd ?? projectRoot,
-      env: { ...env, RAFT_ADAPTER_LOCAL: localDir() },
+      // RAFT_ADAPTER_HTTP_LOCAL pins the daemon (and the dispatcher it installs)
+      // to this directory even when the spawning adapter used RAFT_ADAPTER_LOCAL.
+      env: { ...env, RAFT_ADAPTER_LOCAL: localDir(), RAFT_ADAPTER_HTTP_LOCAL: dir, RAFT_ADAPTER_HTTP_IDENTITY: identity },
       detached: true,
       stdio: ['ignore', log, log],
       windowsHide: true
@@ -114,42 +163,82 @@ function spawnDaemon({ env, cwd }) {
 // Start the daemon once per host, or join the one another adapter already
 // started. The short-lived start lock only covers discovery/launch; the daemon
 // itself owns the lifetime lock.
-export async function ensureDaemon({ env, cwd, dir = localDir() } = {}) {
-  try { return await connectDaemon({ timeout: CONNECT_TIMEOUT_MS, dir }); } catch { /* not running */ }
-  const release = tryInitializeLock(dir, 'http-daemon-start');
-  if (!release) {
+export async function ensureDaemon({ env, cwd, dir = localDir(), identity = null, config = null } = {}) {
+  const wanted = identity ?? (config ? httpIdentity(config) : null);
+  if (wanted) {
+    const existing = await attachMatching({ identity: wanted, timeout: CONNECT_TIMEOUT_MS, dir });
+    if (existing) return existing;
+  } else {
+    try { return await connectDaemon({ timeout: CONNECT_TIMEOUT_MS, dir }); } catch { /* not running */ }
+  }
+  // Several adapters can race to start the daemon. A waiter must only join a
+  // daemon for its own backend configuration: attaching to a mismatched one
+  // would answer this adapter's initialize probe with another backend's model
+  // list, cached under this adapter's key.
+  for (let round = 0; round < 5; round++) {
+    const release = tryInitializeLock(dir, 'http-daemon-start');
+    if (release) {
+      try { return await ensureDaemonLocked({ env, cwd, dir, wanted }); }
+      finally { release(); }
+    }
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      try { return await connectDaemon({ timeout: 1000, dir }); } catch {}
+      const attached = wanted
+        ? await attachMatching({ identity: wanted, timeout: 1000, dir })
+        : await connectDaemon({ timeout: 1000, dir }).catch(() => null);
+      if (attached) return attached;
+      // The lock holder may have produced a daemon we cannot use. Once the
+      // lock is free, retry it on the next round instead of waiting out the
+      // whole timeout.
+      const probe = tryInitializeLock(dir, 'http-daemon-start');
+      if (probe) { probe(); break; }
       await sleep(100);
     }
-    throw new Error('The shared CodeBuddy backend did not become available');
   }
-  try {
-    try { return await connectDaemon({ timeout: CONNECT_TIMEOUT_MS, dir }); } catch {}
+  throw new Error('The shared CodeBuddy backend did not become available');
+}
+
+async function ensureDaemonLocked({ env, cwd, dir, wanted }) {
+  {
+    const attach = () => wanted
+      ? attachMatching({ identity: wanted, timeout: 1000, dir })
+      : connectDaemon({ timeout: 1000, dir }).catch(() => null);
+    const first = await attach();
+    if (first) return first;
     const state = readBackendState(dir);
     if (state && processAlive(state.pid)) {
-      // The daemon may be finishing a previous idle shutdown. Give it a short
-      // grace period to release its lifetime lock, then start a fresh one.
+      // The daemon may be finishing a previous idle shutdown, or may be running
+      // another backend configuration. Give it a short grace period to release
+      // its lifetime lock, then start a fresh one.
       const until = Date.now() + 5000;
       while (Date.now() < until) {
-        try { return await connectDaemon({ timeout: 1000, dir }); } catch {}
+        const attached = await attach();
+        if (attached) return attached;
         if (!processAlive(state.pid)) break;
         await sleep(100);
       }
-      if (processAlive(state.pid)) throw new Error('The shared CodeBuddy backend daemon is running but not accepting connections');
+      if (processAlive(state.pid)) {
+        // A live daemon for a different backend configuration is replaced: its
+        // clients reattach and resume their sessions on the new backend. Any
+        // other live daemon that refuses attachments is a genuine fault.
+        const mismatched = wanted && state.identity && state.identity !== wanted;
+        if (!mismatched) throw new Error('The shared CodeBuddy backend daemon is running but not accepting connections');
+        killDaemonTree(state.pid);
+        const killDeadline = Date.now() + 10000;
+        while (processAlive(state.pid) && Date.now() < killDeadline) await sleep(100);
+        if (processAlive(state.pid)) throw new Error('The shared CodeBuddy backend daemon for another configuration did not stop');
+      }
     }
     try { fs.rmSync(daemonSocketPath(dir), { force: true }); } catch { /* best effort */ }
     try { fs.rmSync(backendStatePath(dir), { force: true }); } catch { /* best effort */ }
-    spawnDaemon({ env, cwd });
+    spawnDaemon({ env, cwd, identity: wanted, dir });
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      try { return await connectDaemon({ timeout: 1000, dir }); } catch {}
+      const attached = await attach();
+      if (attached) return attached;
       await sleep(100);
     }
     throw new Error('The shared CodeBuddy backend did not become healthy');
-  } finally {
-    release();
   }
 }
 
@@ -164,7 +253,11 @@ export function detachDaemon(socket) {
 export function stopDaemon(dir = localDir()) {
   const state = readBackendState(dir);
   if (state && processAlive(state.pid)) {
-    try { process.kill(state.pid, 'SIGTERM'); } catch { /* already gone */ }
+    killDaemonTree(state.pid);
+  } else if (state && processAlive(state.backendPid)) {
+    // An unclean daemon exit can orphan the backend child — nothing ties it to
+    // the daemon on Windows — and the orphan keeps its cwd and sockets locked.
+    killDaemonTree(state.backendPid);
   }
   try { fs.rmSync(daemonSocketPath(dir), { force: true }); } catch { /* best effort */ }
   try { fs.rmSync(backendStatePath(dir), { force: true }); } catch { /* best effort */ }

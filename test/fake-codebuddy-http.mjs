@@ -13,7 +13,6 @@ if (process.env.MOCK_SPAWN_LOG) {
 const args = process.argv.slice(2);
 const portAt = args.indexOf('--port');
 const requestedPort = portAt >= 0 ? Number(args[portAt + 1]) : 0;
-
 const models = {
   'default-model': { name: 'Auto', efforts: ['disabled', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'enabled'], current: 'enabled' },
   'gpt-5.5': { name: 'GPT-5.5', efforts: ['low', 'medium', 'high', 'xhigh', 'enabled'], current: 'enabled' }
@@ -35,9 +34,25 @@ let sessionSeq = 0;
 let permissionSeq = 0;
 const calls = [];
 
+const spawnEnv = process.env.MOCK_STATE_FILE
+  ? {
+      SLOCK_AGENT_ID: process.env.SLOCK_AGENT_ID ?? null,
+      SLOCK_CLI_TRANSPORT_DIR: process.env.SLOCK_CLI_TRANSPORT_DIR ?? null,
+      RAFT_ADAPTER_LOCAL: process.env.RAFT_ADAPTER_LOCAL ?? null,
+      HTTP_LOCAL: process.env.RAFT_ADAPTER_HTTP_LOCAL ?? null
+    }
+  : null;
+
 function persist() {
   if (!process.env.MOCK_STATE_FILE) return;
-  try { fs.writeFileSync(process.env.MOCK_STATE_FILE, JSON.stringify({ sessions: [...sessions.entries()], calls })); } catch { /* best effort */ }
+  try {
+    let env = spawnEnv;
+    try { env = { ...spawnEnv, ...JSON.parse(fs.readFileSync(process.env.MOCK_STATE_FILE, 'utf8')).env }; } catch { /* first write */ }
+    // Atomic write: test readers must never observe a truncated file.
+    const temp = process.env.MOCK_STATE_FILE + '.' + process.pid + '.tmp';
+    fs.writeFileSync(temp, JSON.stringify({ env, sessions: [...sessions.entries()], calls }));
+    fs.renameSync(temp, process.env.MOCK_STATE_FILE);
+  } catch { /* best effort */ }
 }
 const record = (method, extra = {}) => { calls.push({ pid: process.pid, method, ...extra }); persist(); };
 

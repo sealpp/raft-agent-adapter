@@ -117,7 +117,7 @@ export class HttpRpc {
   }
 
   async start() {
-    const attached = await ensureDaemon({ env: this.env, cwd: this.cwd });
+    const attached = await ensureDaemon({ env: this.env, cwd: this.cwd, config: this.config });
     this.control = attached.socket;
     this.port = attached.port;
     this.password = attached.password;
@@ -218,8 +218,11 @@ export class HttpRpc {
       const state = { buffer: '' };
       if (contentType.includes('text/event-stream')) {
         response.setEncoding('utf8');
+        this.streams.add(response);
+        if (this.paused) response.pause();
         response.on('data', chunk => parseSseChunk(state, chunk, item => this.dispatch(item)));
-        response.on('error', error => this.fail(error));
+        response.on('close', () => this.streams.delete(response));
+        response.on('error', error => { this.streams.delete(response); this.fail(error); });
       } else {
         const text = await readBody(response).catch(error => { this.fail(error); return ''; });
         if (text) { try { this.dispatch(JSON.parse(text)); } catch { /* the response was not JSON-RPC */ } }

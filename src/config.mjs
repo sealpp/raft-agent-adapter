@@ -79,7 +79,7 @@ export function nodeExecutable() {
 }
 
 export function localDir() {
-  return process.env.RAFT_ADAPTER_LOCAL || path.join(projectRoot, '.local');
+  return process.env.RAFT_ADAPTER_HTTP_LOCAL || process.env.RAFT_ADAPTER_LOCAL || path.join(projectRoot, '.local');
 }
 
 export function loadConfig() {

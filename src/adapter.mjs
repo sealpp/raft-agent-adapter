@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Rpc, initializeParams } from './rpc.mjs';
 import { spawnHttpRpc } from './http-rpc.mjs';
-import { option, thinkingInfo, catalogKey, reasoningMeta, modelMap, stampCategories, readCatalog, writeCatalog, mergeCatalog, sameCatalog } from './model-config.mjs';
+import { option, thinkingInfo, catalogKey, reasoningMeta, modelMap, stampCategories, readCatalog, updateCatalog, mergeCatalog, sameCatalog } from './model-config.mjs';
 import { loadConfig, version, localDir } from './config.mjs';
 import { backends, readBackendState, writeBackendState, clearPrimedSession, initializeCacheKey, readInitializeCache, writeInitializeCache, invalidateInitializeCache, tryInitializeLock } from './backends.mjs';
 import { recordSessionIdentity, clearSessionIdentity } from './session-identity.mjs';
@@ -149,28 +149,33 @@ let warnedUnverifiedModels = false;
 // thinking options. Record both so an upgrade or restart keeps the metadata for
 // models that remain; models:refresh is then only needed for options that no
 // session has selected yet.
-function persistCatalog(session, { defaultKnown = false } = {}) {
+async function persistCatalog(session, { defaultKnown = false } = {}) {
   const modelOption = option(session, 'model');
   const entries = backend.modelEntries(session, option);
   if (!entries.length) return;
   try {
-    const previous = readCatalog(config.catalogPath);
     const currentValue = modelOption?.currentValue;
     const info = thinkingInfo(session, backend.thinkingConfigId);
-    const next = mergeCatalog(previous, {
-      backendId: backend.id,
-      key: catalogKey(config.executable, modelOption?.options ?? []),
-      entries,
-      current: currentValue
-        ? { value: currentValue, efforts: info.efforts, ...(defaultKnown && info.defaultEffort ? { defaultEffort: info.defaultEffort } : {}) }
-        : null
+    // updateCatalog re-reads the file under the cross-process lock, so a
+    // concurrent agent's discovery is merged rather than overwritten.
+    const next = await updateCatalog(config.catalogPath, previous => {
+      const next = mergeCatalog(previous, {
+        backendId: backend.id,
+        key: catalogKey(config.executable, modelOption?.options ?? []),
+        entries,
+        current: currentValue
+          ? { value: currentValue, efforts: info.efforts, ...(defaultKnown && info.defaultEffort ? { defaultEffort: info.defaultEffort } : {}) }
+          : null
+      });
+      if (sameCatalog(previous, next)) return null;
+      return { ...next, generatedAt: new Date().toISOString() };
     });
-    if (sameCatalog(previous, next)) return;
-    writeCatalog(config.catalogPath, { ...next, generatedAt: new Date().toISOString() });
-    const unknown = entries.filter(entry => !next.models[entry.value]);
-    if (unknown.length && !warnedUnverifiedModels) {
-      warnedUnverifiedModels = true;
-      console.error(`[raft-agent-adapter] ${backend.displayName} offers models without verified thinking options (${unknown.map(entry => entry.value).join(', ')}); run \`npm run models:refresh\` to discover them.`);
+    if (next) {
+      const unknown = entries.filter(entry => !next.models[entry.value]);
+      if (unknown.length && !warnedUnverifiedModels) {
+        warnedUnverifiedModels = true;
+        console.error(`[raft-agent-adapter] ${backend.displayName} offers models without verified thinking options (${unknown.map(entry => entry.value).join(', ')}); run \`npm run models:refresh\` to discover them.`);
+      }
     }
   } catch (error) {
     console.error(`[raft-agent-adapter] Cannot update the ${backend.displayName} model catalog: ${error.message}`);
@@ -283,7 +288,7 @@ async function applyModel(sessionId, modelId, effort) {
     if (option(result, backend.thinkingConfigId)?.currentValue !== requested) throw new Error(`${backend.displayName} did not apply requested reasoning effort: ${requested}`);
   }
   observeConfig(result);
-  persistCatalog(result);
+  await persistCatalog(result);
   console.error(`[raft-agent-adapter] Model configured: ${option(result, 'model')?.currentValue}; thinking=${option(result, backend.thinkingConfigId)?.currentValue ?? 'default'}`);
   return stampCategories(result, backend.thinkingConfigId);
 }
@@ -387,7 +392,7 @@ async function httpInitializeProbe() {
     const opened = await probe.request('session/new', { cwd: process.cwd(), mcpServers: [] }, 90000);
     liveInitialized = initialized;
     persistInitializeCache(initialized, opened);
-    persistCatalog(opened, { defaultKnown: true });
+    await persistCatalog(opened, { defaultKnown: true });
     await probe.request('session/delete', { sessionId: opened.sessionId }, 10000).catch(() => {});
     return {
       ...initialized,
@@ -422,7 +427,7 @@ async function initializeResponse() {
     if (primed) await releasePrimed();
     primed = await openPrimed();
     persistInitializeCache(initialized, primed);
-    persistCatalog(primed, { defaultKnown: true });
+    await persistCatalog(primed, { defaultKnown: true });
     return { ...initialized, agentCapabilities: capabilities, _meta: { ...initialized._meta, modelState: modelResult(primed), 'raft-agent-adapter': { version, backend: backend.id } } };
   } finally {
     if (release) {
@@ -557,7 +562,7 @@ async function handleInner(method, params) {
       }
     }
     observeConfig(opened);
-    persistCatalog(opened, { defaultKnown: method === 'session/new' });
+    await persistCatalog(opened, { defaultKnown: method === 'session/new' });
     if (method === 'session/new' && liveInitialized) persistInitializeCache(liveInitialized, opened);
     sessions.set(sessionId, { standingPrompt: meta.systemPromptOverride ?? '', needsInstructions: true, midTurns: new Set(), deferred: [], usageByRequest: new Map(), cwd: nativeParams.cwd ?? process.cwd() });
     if (config.http) httpLoaded.add(sessionId);

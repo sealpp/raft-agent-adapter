@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Shared CodeBuddy HTTP backend daemon.
 //
-// One daemon per RAFT_ADAPTER_LOCAL directory owns one CodeBuddy server. Each
+// One daemon per RAFT_ADAPTER_HTTP_LOCAL directory owns one CodeBuddy server. Each
 // adapter process attaches over a Unix socket and receives the loopback
 // endpoint. The daemon stops the backend after the last adapter detaches and
 // the idle window expires; adapters then restart it on demand and resume their
@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { loadConfig, localDir } from './config.mjs';
 import { tryInitializeLock } from './backends.mjs';
-import { backendStatePath, daemonSocketPath } from './http-shared.mjs';
+import { backendStatePath, daemonSocketPath, httpIdentity } from './http-shared.mjs';
 import { ensureDispatcher } from './session-identity.mjs';
 
 const START_TIMEOUT_MS = 60000;
@@ -131,10 +131,23 @@ async function main() {
   // backend's own environment belongs to the first agent that started it; the
   // dispatcher chooses the right agent wrapper from CODEBUDDY_SESSION_ID.
   const dispatcher = ensureDispatcher(dir);
+  const identity = process.env.RAFT_ADAPTER_HTTP_IDENTITY ?? httpIdentity(config);
+  // The daemon is started by whichever agent happened to win the start race,
+  // and every tool child of the shared backend inherits its environment. Strip
+  // the per-agent Raft/Slock credentials (agent id, token file, CLI transport
+  // and this adapter's local directory) so another agent's session cannot act
+  // as the first agent; each session's own identity is resolved by the PATH
+  // dispatcher from CODEBUDDY_SESSION_ID instead. The proxy settings the user
+  // configured for the backend (RAFT_ADAPTER_PROXY) are kept.
+  const AGENT_CREDENTIAL = /^(SLOCK_|RAFT_ADAPTER_LOCAL$|RAFT_ADAPTER_HTTP_LOCAL$|RAFT_ADAPTER_HTTP_IDENTITY$|CODEBUDDY_SESSION_ID$)/;
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !AGENT_CREDENTIAL.test(name)));
   const env = {
-    ...process.env,
+    ...inherited,
     CODEBUDDY_GATEWAY_AUTH: 'password',
     CODEBUDDY_GATEWAY_PASSWORD: password,
+    // The dispatcher and per-session identity records live in the daemon's own
+    // directory, independent of any agent's RAFT_ADAPTER_LOCAL.
+    RAFT_ADAPTER_LOCAL: dir,
     PATH: [dispatcher, process.env.PATH ?? process.env.Path].filter(Boolean).join(path.delimiter)
   };
   const child = spawn(config.spawn.command, httpSpawnArgs(config, port), {
@@ -158,7 +171,8 @@ async function main() {
       backendPid: child.pid,
       port,
       password,
-      startedAt: new Date().toISOString()
+      startedAt: new Date().toISOString(),
+      identity
     }), { mode: 0o600 });
     try { fs.chmodSync(file, 0o600); } catch { /* windows */ }
   };

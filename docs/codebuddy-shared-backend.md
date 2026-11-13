@@ -88,7 +88,10 @@ Raft agent E ── stdio ── adapter process E ─┘
   grace period.
 - `src/http-shared.mjs`: daemon discovery/launch, control-socket attach, state
   file, and `stopDaemon()` for tests/uninstall. `http-backend.json` stores the
-  daemon PID as `pid` and the CodeBuddy PID as `backendPid`.
+  daemon PID as `pid`, the CodeBuddy PID as `backendPid`, and an `identity`
+  hash of the backend configuration. A daemon started for a different backend
+  executable or arguments is replaced instead of reused, so a stale process
+  cannot keep serving the previous model list.
 - `src/http-rpc.mjs`: a thin ACP-over-HTTP client. It no longer spawns a
   CodeBuddy process. It attaches to the daemon, opens its own connection, adds
   the Web UI headers, and detaches on close.
@@ -99,14 +102,19 @@ Raft agent E ── stdio ── adapter process E ─┘
 - `src/session-identity.mjs`: records the per-session `raft`/`slock`/`cont`
   wrapper and installs the dispatcher that the daemon puts in front of PATH.
 - `src/cli-dispatcher.mjs`: reads `CODEBUDDY_SESSION_ID` from the tool process
-  and execs the wrapper recorded for that session.
+  and execs the wrapper recorded for that session. The Windows `.cmd` shim is
+  the standard npm-style one (quoted paths, raw `%*`), so node's own argv
+  parsing keeps argument quoting intact.
 
 ### Per-session Raft identity
 
-The shared backend's process environment belongs to the first agent that
-started it. Every Bash tool child inherits that agent's `PATH`,
-`SLOCK_AGENT_ID` and proxy token, so a bare `raft message send` from any other
-session used to post as the first agent.
+The shared backend's process environment must not belong to the first agent
+that started it. `http-daemon.mjs` strips every `SLOCK_*` variable plus the
+adapter-local ones (`RAFT_ADAPTER_LOCAL`, `RAFT_ADAPTER_HTTP_*`,
+`CODEBUDDY_SESSION_ID`) from the backend's inherited environment, so a bare
+`raft message send` from any other session cannot inherit the first agent's
+credentials — it can only reach the Raft CLI through the session dispatcher
+below.
 
 CodeBuddy injects `CODEBUDDY_SESSION_ID` into tool children. The adapter uses
 that id as the session key:

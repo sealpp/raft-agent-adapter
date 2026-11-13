@@ -44,7 +44,10 @@ function config(session) {
 
 function persist() {
   if (!process.env.MOCK_STATE_FILE) return;
-  fs.writeFileSync(process.env.MOCK_STATE_FILE, JSON.stringify({ sessions: [...sessions.entries()].map(([id, s]) => [id, { ...s, active: false, inflight: false }]), calls }));
+  // Atomic write: test readers must never observe a truncated file.
+  const temp = process.env.MOCK_STATE_FILE + '.' + process.pid + '.tmp';
+  fs.writeFileSync(temp, JSON.stringify({ sessions: [...sessions.entries()].map(([id, s]) => [id, { ...s, active: false, inflight: false }]), calls }));
+  fs.renameSync(temp, process.env.MOCK_STATE_FILE);
 }
 
 function record(method, extra = {}) {

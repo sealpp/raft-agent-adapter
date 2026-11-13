@@ -105,6 +105,7 @@ Raft 展示的是**家族**模型 ID（`devin:swe-2`），档位由独立的推�
 | 配置文件 | `RAFT_ADAPTER_CONFIG` → 检出目录的 `adapter.config.json` |
 | HTTP ACP 传输 | 仅 CodeBuddy，默认开启。每主机一个 daemon 持有单个 loopback 后端，每个 agent 独立 connection/session。`RAFT_ADAPTER_HTTP=0` 回退 stdio |
 | HTTP 空闲停止 | 仅 CodeBuddy，默认 5 分钟。空闲 adapter 断开连接，最后一个客户端退出后共享后端停止；下次请求重启并恢复会话。`RAFT_ADAPTER_HTTP_IDLE_MS=0` 保持常驻 |
+| 共享 daemon 目录 | 仅 CodeBuddy HTTP。`RAFT_ADAPTER_HTTP_LOCAL` 覆盖 daemon 发现与状态文件所在的本地目录；默认取 `RAFT_ADAPTER_LOCAL` 或检出目录的 `.local` |
 
 显式代理只为**后端子进程**设置 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`——不启动代理服务，也不改动系统代理。
 

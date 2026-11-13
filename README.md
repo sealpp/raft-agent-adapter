@@ -105,6 +105,7 @@ All optional — sensible defaults discover each backend at its standard install
 | Config file | `RAFT_ADAPTER_CONFIG` → checkout's `adapter.config.json` |
 | HTTP ACP transport | CodeBuddy only, on by default. A per-host daemon owns one loopback server; every agent opens its own connection/session. Set `RAFT_ADAPTER_HTTP=0` to use stdio |
 | HTTP idle stop | CodeBuddy only; default 5 minutes. Idle adapters detach and the shared backend stops after the last client; the next prompt restarts it and resumes each session. Set `RAFT_ADAPTER_HTTP_IDLE_MS=0` to keep it warm |
+| Shared daemon directory | CodeBuddy HTTP only. `RAFT_ADAPTER_HTTP_LOCAL` overrides the local directory used for daemon discovery and state; default is `RAFT_ADAPTER_LOCAL` or the checkout's `.local` |
 
 An explicit proxy sets `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` on the backend child process only — it starts no proxy server and changes nothing system-wide.
 

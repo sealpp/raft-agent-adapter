@@ -83,12 +83,14 @@ function quote(value) {
   return SINGLE_QUOTE + text.replaceAll(SINGLE_QUOTE, SINGLE_QUOTE + BACKSLASH + SINGLE_QUOTE + SINGLE_QUOTE) + SINGLE_QUOTE;
 }
 
-function posixShim(name) {
+export function posixShim(name) {
   return `#!/bin/sh\nexec ${quote(nodePath)} ${quote(dispatcherPath)} ${name} "$@"\n`;
 }
 
-function windowsShim(name) {
-  return `@echo off\r\n${quote(nodePath)} ${quote(dispatcherPath)} ${name} %*\r\n`;
+// Standard npm-style .cmd shim: cmd forwards %* and node parses the quoting
+// (CommandLineToArgvW), so arguments with spaces or apostrophes survive.
+export function windowsShim(name) {
+  return '@echo off\r\n"' + nodePath + '" "' + dispatcherPath + '" ' + name + ' %*\r\n';
 }
 
 // A tiny PATH entry in front of the shared backend. The script itself only

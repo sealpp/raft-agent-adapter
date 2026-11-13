@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { Rpc, initializeParams } from '../src/rpc.mjs';
 import { projectRoot } from '../src/config.mjs';
-import { stopDaemon } from '../src/http-shared.mjs';
+import { stopDaemon, readBackendState, ensureDaemon, httpIdentity, detachDaemon } from '../src/http-shared.mjs';
+import { tryInitializeLock } from '../src/backends.mjs';
+import { HttpRpc } from '../src/http-rpc.mjs';
+import http from 'node:http';
 
 function fixture(t, extraEnv = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-http-test-'));
@@ -30,8 +33,12 @@ function fixture(t, extraEnv = {}) {
     ...extraEnv
   };
   const clients = [];
-  const open = () => {
-    const rpc = new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env });
+  // All adapter clients go through here so the fixture's cleanup hook —
+  // which node:test runs first, in registration order — closes every one of
+  // them before removing the temp dir. On Windows a still-running adapter
+  // holds its cwd and makes rmSync fail with EPERM.
+  const open = (clientEnv = env) => {
+    const rpc = new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env: clientEnv });
     clients.push(rpc);
     return rpc;
   };
@@ -39,7 +46,15 @@ function fixture(t, extraEnv = {}) {
     for (const rpc of clients) await rpc.close();
     stopDaemon(temp);
     await new Promise(resolve => setTimeout(resolve, 300));
-    fs.rmSync(temp, { recursive: true, force: true });
+    // Windows keeps a killed daemon's directory entry locked briefly while
+    // the backend child exits; retry instead of failing the whole file.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { fs.rmSync(temp, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (attempt === 19) throw error;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
   });
   const spawns = () => fs.existsSync(env.MOCK_SPAWN_LOG)
     ? fs.readFileSync(env.MOCK_SPAWN_LOG, 'utf8').split('\n').filter(Boolean)
@@ -50,7 +65,7 @@ function fixture(t, extraEnv = {}) {
   const state = () => fs.existsSync(env.MOCK_STATE_FILE)
     ? JSON.parse(fs.readFileSync(env.MOCK_STATE_FILE, 'utf8'))
     : { sessions: [] };
-  return { open, temp, cliTransport, spawns, calls, state };
+  return { open, temp, cliTransport, spawns, calls, state, env };
 }
 
 function collect(rpc) {
@@ -62,7 +77,7 @@ function collect(rpc) {
 }
 
 test('HTTP ACP answers the handshake, opens a session, and streams a prompt', { timeout: 60000 }, async t => {
-  const { open, temp, cliTransport, spawns, calls, state } = fixture(t);
+  const { open, temp, cliTransport, spawns, calls, state } = fixture(t, { SLOCK_AGENT_ID: 'agent-a', SLOCK_AGENT_TOKEN_FILE: '/tmp/token' });
   const rpc = open();
   const init = await rpc.request('initialize', initializeParams);
   assert.equal(init.agentCapabilities.loadSession, true);
@@ -88,6 +103,13 @@ test('HTTP ACP answers the handshake, opens a session, and streams a prompt', { 
   assert.equal(spawns().length, 1);
   assert.equal(calls().find(call => call.method === 'initialize')?.clientName, 'codebuddy-web-ui');
   assert.ok(calls().some(call => call.method === 'acp-request' && call.webUi === true));
+  // The shared backend must not inherit the starting agent's Raft identity:
+  // tool children resolve their own agent through CODEBUDDY_SESSION_ID.
+  const backendEnv = state().env;
+  assert.equal(backendEnv.SLOCK_AGENT_ID, null);
+  assert.equal(backendEnv.SLOCK_AGENT_TOKEN_FILE ?? null, null);
+  assert.equal(backendEnv.SLOCK_CLI_TRANSPORT_DIR, null);
+  assert.equal(backendEnv.RAFT_ADAPTER_LOCAL, temp);
 });
 
 test('two agents get independent HTTP connections and both answer concurrently', { timeout: 60000 }, async t => {
@@ -205,4 +227,187 @@ test('five agents share one HTTP backend and answer concurrently', { timeout: 60
     .map(message => message.params.update.content.text)
     .join('')), Array.from({ length: 5 }, (_, index) => '[default-model] agent-' + index));
   assert.equal(spawns().length, 1, 'all five agents must share one CodeBuddy backend process');
+});
+test('agents selecting different models keep both thinking options in the catalog', { timeout: 60000 }, async t => {
+  const { open, temp } = fixture(t);
+  const a = open();
+  const b = open();
+  await a.request('initialize', initializeParams);
+  const sessionA = await a.request('session/new', { cwd: temp, mcpServers: [] });
+  await a.request('session/set_config_option', { sessionId: sessionA.sessionId, configId: 'model', value: 'gpt-5.5' });
+  await b.request('initialize', initializeParams);
+  const sessionB = await b.request('session/new', { cwd: temp, mcpServers: [] });
+  // Fire both catalog merges without awaiting between them: the read/merge/
+  // write must be serialized across the two adapter processes.
+  await Promise.all([
+    a.request('session/set_config_option', { sessionId: sessionA.sessionId, configId: 'model', value: 'default-model' }),
+    b.request('session/set_config_option', { sessionId: sessionB.sessionId, configId: 'model', value: 'gpt-5.5' })
+  ]);
+  const catalog = JSON.parse(fs.readFileSync(path.join(temp, 'model-catalog.json'), 'utf8'));
+  assert.ok(catalog.models['gpt-5.5']?.efforts?.length, 'gpt-5.5 efforts must survive the concurrent merge');
+  assert.ok(catalog.models['default-model']?.efforts?.length, 'default-model efforts must survive the concurrent merge');
+});
+
+test('a daemon started for a different backend executable is replaced', { timeout: 120000 }, async t => {
+  const { open, temp, env, spawns } = fixture(t);
+  const configB = path.join(temp, 'config-b.json');
+  const exeB = path.join(temp, 'codebuddy-b.mjs');
+  fs.copyFileSync(path.join(projectRoot, 'test/fake-codebuddy-http.mjs'), exeB);
+  fs.writeFileSync(configB, JSON.stringify({
+    backend: 'codebuddy',
+    codebuddyExe: process.execPath,
+    codebuddyArgs: [exeB, '--acp']
+  }));
+  const envB = { ...env, RAFT_ADAPTER_CONFIG: configB };
+  const openB = () => open(envB);
+
+  const a = open();
+  await a.request('initialize', initializeParams);
+  const firstDaemon = readBackendState(temp);
+  assert.ok(firstDaemon?.pid);
+
+  // Agent B's executable differs, so its initialize cache key differs: it must
+  // not be served (and cached) by the daemon running agent A's build.
+  const b = openB();
+  await b.request('initialize', initializeParams);
+  const secondDaemon = readBackendState(temp);
+  assert.ok(secondDaemon?.pid);
+  assert.notEqual(secondDaemon.pid, firstDaemon.pid, 'the mismatched daemon must be replaced');
+  assert.equal(spawns().length, 2, 'each backend configuration gets its own CodeBuddy process');
+
+  // Agent A's connection died with its daemon. Its next request replaces the
+  // mismatched daemon with one for its own configuration and still works.
+  const sessionA = await a.request('session/new', { cwd: temp, mcpServers: [] });
+  assert.ok(sessionA.sessionId);
+  assert.equal(spawns().length, 3, 'agent A starts a daemon for its own backend build');
+
+  // Agent C shares A's configuration: it joins the replacement daemon instead
+  // of starting yet another backend.
+  const c = open();
+  await c.request('initialize', initializeParams);
+  const sessionC = await c.request('session/new', { cwd: temp, mcpServers: [] });
+  assert.ok(sessionC.sessionId);
+  assert.equal(spawns().length, 3, 'matching configurations share one backend');
+});
+
+test('a daemon waiter only joins a daemon for its own backend', { timeout: 120000 }, async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-http-waiter-'));
+  t.after(async () => {
+    stopDaemon(temp);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { fs.rmSync(temp, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (attempt === 19) throw error;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+  });
+  const fake = path.join(projectRoot, 'test/fake-codebuddy-http.mjs');
+  const exeA = path.join(temp, 'codebuddy-a.mjs');
+  const exeB = path.join(temp, 'codebuddy-b.mjs');
+  fs.copyFileSync(fake, exeA);
+  fs.copyFileSync(fake, exeB);
+  fs.appendFileSync(exeB, '\n// different backend build\n');
+  const configFile = (exe, name) => {
+    const file = path.join(temp, name);
+    fs.writeFileSync(file, JSON.stringify({ backend: 'codebuddy', codebuddyExe: process.execPath, codebuddyArgs: [exe, '--acp'] }));
+    return file;
+  };
+  const envFor = file => ({
+    ...process.env,
+    RAFT_ADAPTER_CONFIG: file,
+    RAFT_ADAPTER_LOCAL: temp,
+    RAFT_ADAPTER_HTTP: '1',
+    MOCK_STATE_FILE: path.join(temp, 'sessions.json'),
+    MOCK_SPAWN_LOG: path.join(temp, 'spawns.log')
+  });
+  const configFor = exe => ({
+    backendId: 'codebuddy',
+    executable: exe,
+    spawn: { command: process.execPath, args: [exe, '--acp'] }
+  });
+  const configA = configFor(exeA);
+  const configB = configFor(exeB);
+  const envA = envFor(configFile(exeA, 'config-a.json'));
+  const envB = envFor(configFile(exeB, 'config-b.json'));
+
+  const first = await ensureDaemon({ env: envA, cwd: temp, dir: temp, config: configA });
+  assert.equal(first.state.identity, httpIdentity(configA));
+
+  // Simulate another starter holding the start lock while agent B waits. The
+  // waiter must not attach to agent A's daemon: its initialize probe would be
+  // answered with A's model list and cached under B's key.
+  const releaseHold = tryInitializeLock(temp, 'http-daemon-start');
+  assert.ok(releaseHold);
+  setTimeout(() => releaseHold(), 400);
+  const second = await ensureDaemon({ env: envB, cwd: temp, dir: temp, config: configB });
+  assert.equal(second.state.identity, httpIdentity(configB), 'the waiter ends up on a daemon for its own backend');
+  assert.notEqual(second.state.pid, first.state.pid);
+  const spawns = () => fs.readFileSync(path.join(temp, 'spawns.log'), 'utf8').trim().split('\n').length;
+  assert.equal(spawns(), 2, 'each backend configuration gets its own CodeBuddy process');
+  detachDaemon(first.socket);
+  detachDaemon(second.socket);
+});
+
+test('a POST event-stream response pauses and resumes with Raft backpressure', { timeout: 30000 }, async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-http-rpc-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (url.pathname === '/api/v1/acp/connect') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ connectionId: 'c1', sessionToken: 't1' }));
+    }
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write(':ok\n\n');
+      return;
+    }
+    if (req.method === 'DELETE') { res.writeHead(204); return res.end(); }
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      const message = JSON.parse(body);
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      let sent = 0;
+      const timer = setInterval(() => {
+        sent++;
+        res.write('data: ' + JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 's', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'x' } } } }) + '\n\n');
+        if (sent >= 30) {
+          clearInterval(timer);
+          res.end('data: ' + JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { stopReason: 'end_turn' } }) + '\n\n');
+        }
+      }, 5);
+      res.once('close', () => clearInterval(timer));
+    });
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections?.(); server.close(); });
+
+  const rpc = new HttpRpc(null, { env: {}, cwd: temp });
+  t.after(() => rpc.close());
+  // Attach directly: this test exercises the POST stream, not daemon discovery.
+  rpc.port = server.address().port;
+  rpc.password = 'pw';
+  await rpc.connect();
+  let updates = 0;
+  rpc.onNotification = () => { updates++; };
+
+  const pending = rpc.request('session/prompt', { sessionId: 's', prompt: [] });
+  const deadline = Date.now() + 5000;
+  while (rpc.streams.size < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(rpc.streams.size, 2, 'the GET notification stream and the POST response stream are both tracked');
+
+  rpc.pause();
+  assert.ok([...rpc.streams].every(stream => stream._readableState.flowing === false), 'every stream pauses');
+  const pausedCount = updates;
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(updates, pausedCount, 'no updates are dispatched while paused');
+
+  rpc.resume();
+  assert.ok([...rpc.streams].every(stream => stream._readableState.flowing === true), 'every stream resumes');
+  const result = await pending;
+  assert.equal(result.stopReason, 'end_turn');
+  assert.ok(updates >= 30, 'the streamed updates were all delivered after resume');
 });

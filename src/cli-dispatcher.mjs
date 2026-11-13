@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { validSessionId, wrapperForSession } from './session-identity.mjs';
 
 const name = process.argv[2];
+// The .cmd shim forwards cmd's %*; node's own argv parsing keeps the quoting.
 const args = process.argv.slice(3);
 if (!['raft', 'slock', 'cont'].includes(name)) {
   console.error('raft: unknown command ' + name);
