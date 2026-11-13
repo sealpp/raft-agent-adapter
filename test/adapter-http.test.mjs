@@ -42,7 +42,15 @@ function fixture(t, extraEnv = {}) {
     for (const rpc of clients) await rpc.close();
     stopDaemon(temp);
     await new Promise(resolve => setTimeout(resolve, 300));
-    fs.rmSync(temp, { recursive: true, force: true });
+    // Windows keeps a killed daemon's directory entry locked briefly while
+    // the backend child exits; retry instead of failing the whole file.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { fs.rmSync(temp, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (attempt === 19) throw error;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
   });
   const spawns = () => fs.existsSync(env.MOCK_SPAWN_LOG)
     ? fs.readFileSync(env.MOCK_SPAWN_LOG, 'utf8').split('\n').filter(Boolean)
@@ -286,9 +294,15 @@ test('a daemon started for a different backend executable is replaced', { timeou
 
 test('a daemon waiter only joins a daemon for its own backend', { timeout: 120000 }, async t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-http-waiter-'));
-  t.after(() => {
+  t.after(async () => {
     stopDaemon(temp);
-    setTimeout(() => fs.rmSync(temp, { recursive: true, force: true }), 300);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try { fs.rmSync(temp, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (attempt === 19) throw error;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
   });
   const fake = path.join(projectRoot, 'test/fake-codebuddy-http.mjs');
   const exeA = path.join(temp, 'codebuddy-a.mjs');
@@ -333,6 +347,7 @@ test('a daemon waiter only joins a daemon for its own backend', { timeout: 12000
   assert.notEqual(second.state.pid, first.state.pid);
   const spawns = () => fs.readFileSync(path.join(temp, 'spawns.log'), 'utf8').trim().split('\n').length;
   assert.equal(spawns(), 2, 'each backend configuration gets its own CodeBuddy process');
+  detachDaemon(first.socket);
   detachDaemon(second.socket);
 });
 

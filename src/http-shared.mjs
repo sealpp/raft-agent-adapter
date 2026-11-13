@@ -10,13 +10,26 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { localDir, projectRoot } from './config.mjs';
 import { tryInitializeLock, initializeCacheKey } from './backends.mjs';
 
 const START_TIMEOUT_MS = 60000;
 const CONNECT_TIMEOUT_MS = 5000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Stop a daemon and everything it spawned. Windows has no SIGTERM delivery:
+// process.kill(pid, 'SIGTERM') is TerminateProcess, which skips the daemon's
+// cleanup and orphans the backend child (which then keeps its cwd locked).
+// taskkill /T ends the whole tree instead; POSIX keeps SIGTERM so the daemon
+// can shut the backend down gracefully.
+function killDaemonTree(pid) {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+}
 
 export function backendStatePath(dir = localDir()) {
   return path.join(dir, 'http-backend.json');
@@ -210,7 +223,7 @@ async function ensureDaemonLocked({ env, cwd, dir, wanted }) {
         // other live daemon that refuses attachments is a genuine fault.
         const mismatched = wanted && state.identity && state.identity !== wanted;
         if (!mismatched) throw new Error('The shared CodeBuddy backend daemon is running but not accepting connections');
-        try { process.kill(state.pid, 'SIGTERM'); } catch { /* already gone */ }
+        killDaemonTree(state.pid);
         const killDeadline = Date.now() + 10000;
         while (processAlive(state.pid) && Date.now() < killDeadline) await sleep(100);
         if (processAlive(state.pid)) throw new Error('The shared CodeBuddy backend daemon for another configuration did not stop');
@@ -240,7 +253,7 @@ export function detachDaemon(socket) {
 export function stopDaemon(dir = localDir()) {
   const state = readBackendState(dir);
   if (state && processAlive(state.pid)) {
-    try { process.kill(state.pid, 'SIGTERM'); } catch { /* already gone */ }
+    killDaemonTree(state.pid);
   }
   try { fs.rmSync(daemonSocketPath(dir), { force: true }); } catch { /* best effort */ }
   try { fs.rmSync(backendStatePath(dir), { force: true }); } catch { /* best effort */ }
