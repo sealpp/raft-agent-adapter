@@ -11,10 +11,8 @@ import { option, reasoningMeta, catalogKey } from '../src/model-config.mjs';
 
 const fakeModels = [{ value: 'swe-2-high', name: 'SWE-2' }, { value: 'gpt-lite-none', name: 'GPT Lite' }];
 
-async function fixture(t, extraEnv = {}, { catalog = false } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-devin-test-'));
-  const configFile = path.join(temp, 'config.json');
-  fs.writeFileSync(configFile, JSON.stringify({ backend: 'devin', devinExe: process.execPath, devinArgs: [path.join(projectRoot, 'test/fake-devin.mjs')] }));
+function writePeerConfig(temp, { catalog = false } = {}) {
+  fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ backend: 'devin', devinExe: process.execPath, devinArgs: [path.join(projectRoot, 'test/fake-devin.mjs')] }));
   if (catalog) {
     fs.writeFileSync(path.join(temp, 'model-catalog.json'), JSON.stringify({
       schema: 1, backend: 'devin',
@@ -25,7 +23,12 @@ async function fixture(t, extraEnv = {}, { catalog = false } = {}) {
       }
     }));
   }
-  const env = { ...process.env, RAFT_ADAPTER_CONFIG: configFile, RAFT_ADAPTER_LOCAL: temp, MOCK_STATE_FILE: path.join(temp, 'sessions.json'), ...extraEnv };
+}
+
+async function fixture(t, extraEnv = {}, { catalog = false } = {}) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-devin-test-'));
+  writePeerConfig(temp, { catalog });
+  const env = { ...process.env, RAFT_ADAPTER_CONFIG: path.join(temp, 'config.json'), RAFT_ADAPTER_LOCAL: temp, MOCK_STATE_FILE: path.join(temp, 'sessions.json'), ...extraEnv };
   const start = () => new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env });
   const clients = [];
   const open = () => { const rpc = start(); clients.push(rpc); return rpc; };
@@ -152,6 +155,17 @@ test('authenticate is forwarded and drops the unauthenticated primed session', a
   const fresh = await rpc.request('session/new', { cwd: process.cwd(), mcpServers: [] });
   assert.equal(fresh.sessionId, 'fixture-2'); // not the released primed session
   await rpc.request('session/delete', { sessionId: fresh.sessionId });
+});
+
+test('test-live.mjs passes end-to-end against the deterministic peer', async t => {
+  // The live check drives the same family-id model surface (devin:swe-2, not
+  // the base devin:swe-2-high); running it offline keeps its lookup honest.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-devin-live-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  writePeerConfig(temp, { catalog: true });
+  const env = { ...process.env, RAFT_ADAPTER_CONFIG: path.join(temp, 'config.json'), RAFT_ADAPTER_LOCAL: temp };
+  const output = execFileSync(process.execPath, [path.join(projectRoot, 'scripts/test-live.mjs')], { encoding: 'utf8', env });
+  assert.match(output, /"passed":\s*true/);
 });
 
 test('missing mid-turn capability fails initialization explicitly', async t => {
