@@ -102,9 +102,9 @@ Raft agent E ── stdio ── adapter process E ─┘
 - `src/session-identity.mjs`: records the per-session `raft`/`slock`/`cont`
   wrapper and installs the dispatcher that the daemon puts in front of PATH.
 - `src/cli-dispatcher.mjs`: reads `CODEBUDDY_SESSION_ID` from the tool process
-  and execs the wrapper recorded for that session. On Windows the `.cmd` shim
-  passes cmd's raw `%*` text through `RAFT_CLI_DISPATCH_ARGS` so paths and
-  arguments keep their quoting (cmd re-expands `%*` unquoted).
+  and execs the wrapper recorded for that session. The Windows `.cmd` shim is
+  the standard npm-style one (quoted paths, raw `%*`), so node's own argv
+  parsing keeps argument quoting intact.
 
 ### Per-session Raft identity
 

@@ -83,33 +83,32 @@ test('the posix shim is valid shell and forwards every argument', { skip: proces
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('the windows shim quotes its paths and passes raw args to the dispatcher', () => {
+test('the windows shim quotes its paths and forwards %* like npm shims', () => {
   const content = windowsShim('raft');
   assert.match(content, /@echo off\r\n/);
   assert.ok(content.includes('"' + process.execPath + '"'), 'node path must stay quoted for checkout paths with spaces');
-  assert.ok(content.includes('RAFT_CLI_DISPATCH_ARGS=%*'), 'cmd must not re-split %*');
-  assert.ok(content.includes('cli-dispatcher.mjs'));
+  assert.ok(content.includes('"' + path.join(projectRoot, 'src', 'cli-dispatcher.mjs') + '"'));
+  assert.ok(content.endsWith(' raft %*\r\n'));
+  assert.ok(!content.includes('RAFT_CLI_DISPATCH_ARGS'), 'no cmd env round-trip that cmd quoting could corrupt');
 });
 
-test('cli-dispatcher parses RAFT_CLI_DISPATCH_ARGS like a shell would', { skip: process.platform === 'win32' }, () => {
+test('cli-dispatcher receives arguments with spaces and apostrophes intact', { skip: process.platform === 'win32' }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-dispatch-'));
   const transport = path.join(dir, 'transport');
   fs.mkdirSync(transport);
   const marker = path.join(dir, 'marker');
   fs.writeFileSync(path.join(transport, 'raft'), '#!/bin/sh\nprintf \'<%s>\\n\' "$@" > \'' + marker + '\'\n', { mode: 0o755 });
   recordSessionIdentity('session-q', { env: { SLOCK_CLI_TRANSPORT_DIR: transport }, dir });
-  const result = spawnSync(process.execPath, [path.join(projectRoot, 'src', 'cli-dispatcher.mjs'), 'raft'], {
-    env: {
-      ...process.env,
-      RAFT_ADAPTER_LOCAL: dir,
-      CODEBUDDY_SESSION_ID: 'session-q',
-      RAFT_CLI_DISPATCH_ARGS: 'message send --target "dm:@some one" --note "it\'s"'
-    },
+  const result = spawnSync(process.execPath, [
+    path.join(projectRoot, 'src', 'cli-dispatcher.mjs'), 'raft',
+    'message', 'send', '--target', 'dm:@some one', "it's", 'say "hi"'
+  ], {
+    env: { ...process.env, RAFT_ADAPTER_LOCAL: dir, CODEBUDDY_SESSION_ID: 'session-q' },
     encoding: 'utf8'
   });
   assert.equal(result.status, 0, result.stderr);
   const lines = fs.readFileSync(marker, 'utf8').trimEnd().split('\n').map(line => line.slice(1, -1));
-  assert.deepEqual(lines, ['message', 'send', '--target', 'dm:@some one', '--note', "it's"]);
+  assert.deepEqual(lines, ['message', 'send', '--target', 'dm:@some one', "it's", 'say "hi"']);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -87,11 +87,10 @@ export function posixShim(name) {
   return `#!/bin/sh\nexec ${quote(nodePath)} ${quote(dispatcherPath)} ${name} "$@"\n`;
 }
 
-// cmd.exe re-expands %* without its original quoting, so a checkout path with
-// spaces would split the script path. The shim lives next to cli-dispatcher.mjs
-// and hands cmd's raw argument text to the dispatcher, which parses it itself.
+// Standard npm-style .cmd shim: cmd forwards %* and node parses the quoting
+// (CommandLineToArgvW), so arguments with spaces or apostrophes survive.
 export function windowsShim(name) {
-  return '@echo off\r\nset "RAFT_CLI_DISPATCH_NAME=' + name + '"\r\nset "RAFT_CLI_DISPATCH_ARGS=%*"\r\n"' + nodePath + '" "' + dispatcherPath + '" ' + name + '\r\n';
+  return '@echo off\r\n"' + nodePath + '" "' + dispatcherPath + '" ' + name + ' %*\r\n';
 }
 
 // A tiny PATH entry in front of the shared backend. The script itself only
