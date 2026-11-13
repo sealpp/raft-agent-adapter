@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { Rpc, initializeParams } from '../src/rpc.mjs';
 import { projectRoot } from '../src/config.mjs';
-import { stopDaemon, readBackendState } from '../src/http-shared.mjs';
+import { stopDaemon, readBackendState, ensureDaemon, httpIdentity, detachDaemon } from '../src/http-shared.mjs';
+import { tryInitializeLock } from '../src/backends.mjs';
 import { HttpRpc } from '../src/http-rpc.mjs';
 import http from 'node:http';
 
@@ -281,6 +282,58 @@ test('a daemon started for a different backend executable is replaced', { timeou
   const sessionC = await c.request('session/new', { cwd: temp, mcpServers: [] });
   assert.ok(sessionC.sessionId);
   assert.equal(spawns().length, 3, 'matching configurations share one backend');
+});
+
+test('a daemon waiter only joins a daemon for its own backend', { timeout: 120000 }, async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'raft-http-waiter-'));
+  t.after(() => {
+    stopDaemon(temp);
+    setTimeout(() => fs.rmSync(temp, { recursive: true, force: true }), 300);
+  });
+  const fake = path.join(projectRoot, 'test/fake-codebuddy-http.mjs');
+  const exeA = path.join(temp, 'codebuddy-a.mjs');
+  const exeB = path.join(temp, 'codebuddy-b.mjs');
+  fs.copyFileSync(fake, exeA);
+  fs.copyFileSync(fake, exeB);
+  fs.appendFileSync(exeB, '\n// different backend build\n');
+  const configFile = (exe, name) => {
+    const file = path.join(temp, name);
+    fs.writeFileSync(file, JSON.stringify({ backend: 'codebuddy', codebuddyExe: process.execPath, codebuddyArgs: [exe, '--acp'] }));
+    return file;
+  };
+  const envFor = file => ({
+    ...process.env,
+    RAFT_ADAPTER_CONFIG: file,
+    RAFT_ADAPTER_LOCAL: temp,
+    RAFT_ADAPTER_HTTP: '1',
+    MOCK_STATE_FILE: path.join(temp, 'sessions.json'),
+    MOCK_SPAWN_LOG: path.join(temp, 'spawns.log')
+  });
+  const configFor = exe => ({
+    backendId: 'codebuddy',
+    executable: exe,
+    spawn: { command: process.execPath, args: [exe, '--acp'] }
+  });
+  const configA = configFor(exeA);
+  const configB = configFor(exeB);
+  const envA = envFor(configFile(exeA, 'config-a.json'));
+  const envB = envFor(configFile(exeB, 'config-b.json'));
+
+  const first = await ensureDaemon({ env: envA, cwd: temp, dir: temp, config: configA });
+  assert.equal(first.state.identity, httpIdentity(configA));
+
+  // Simulate another starter holding the start lock while agent B waits. The
+  // waiter must not attach to agent A's daemon: its initialize probe would be
+  // answered with A's model list and cached under B's key.
+  const releaseHold = tryInitializeLock(temp, 'http-daemon-start');
+  assert.ok(releaseHold);
+  setTimeout(() => releaseHold(), 400);
+  const second = await ensureDaemon({ env: envB, cwd: temp, dir: temp, config: configB });
+  assert.equal(second.state.identity, httpIdentity(configB), 'the waiter ends up on a daemon for its own backend');
+  assert.notEqual(second.state.pid, first.state.pid);
+  const spawns = () => fs.readFileSync(path.join(temp, 'spawns.log'), 'utf8').trim().split('\n').length;
+  assert.equal(spawns(), 2, 'each backend configuration gets its own CodeBuddy process');
+  detachDaemon(second.socket);
 });
 
 test('a POST event-stream response pauses and resumes with Raft backpressure', { timeout: 30000 }, async t => {

@@ -158,16 +158,35 @@ export async function ensureDaemon({ env, cwd, dir = localDir(), identity = null
   } else {
     try { return await connectDaemon({ timeout: CONNECT_TIMEOUT_MS, dir }); } catch { /* not running */ }
   }
-  const release = tryInitializeLock(dir, 'http-daemon-start');
-  if (!release) {
+  // Several adapters can race to start the daemon. A waiter must only join a
+  // daemon for its own backend configuration: attaching to a mismatched one
+  // would answer this adapter's initialize probe with another backend's model
+  // list, cached under this adapter's key.
+  for (let round = 0; round < 5; round++) {
+    const release = tryInitializeLock(dir, 'http-daemon-start');
+    if (release) {
+      try { return await ensureDaemonLocked({ env, cwd, dir, wanted }); }
+      finally { release(); }
+    }
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      try { return await connectDaemon({ timeout: 1000, dir }); } catch {}
+      const attached = wanted
+        ? await attachMatching({ identity: wanted, timeout: 1000, dir })
+        : await connectDaemon({ timeout: 1000, dir }).catch(() => null);
+      if (attached) return attached;
+      // The lock holder may have produced a daemon we cannot use. Once the
+      // lock is free, retry it on the next round instead of waiting out the
+      // whole timeout.
+      const probe = tryInitializeLock(dir, 'http-daemon-start');
+      if (probe) { probe(); break; }
       await sleep(100);
     }
-    throw new Error('The shared CodeBuddy backend did not become available');
   }
-  try {
+  throw new Error('The shared CodeBuddy backend did not become available');
+}
+
+async function ensureDaemonLocked({ env, cwd, dir, wanted }) {
+  {
     const attach = () => wanted
       ? attachMatching({ identity: wanted, timeout: 1000, dir })
       : connectDaemon({ timeout: 1000, dir }).catch(() => null);
@@ -207,8 +226,6 @@ export async function ensureDaemon({ env, cwd, dir = localDir(), identity = null
       await sleep(100);
     }
     throw new Error('The shared CodeBuddy backend did not become healthy');
-  } finally {
-    release();
   }
 }
 
