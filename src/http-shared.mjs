@@ -254,6 +254,10 @@ export function stopDaemon(dir = localDir()) {
   const state = readBackendState(dir);
   if (state && processAlive(state.pid)) {
     killDaemonTree(state.pid);
+  } else if (state && processAlive(state.backendPid)) {
+    // An unclean daemon exit can orphan the backend child — nothing ties it to
+    // the daemon on Windows — and the orphan keeps its cwd and sockets locked.
+    killDaemonTree(state.backendPid);
   }
   try { fs.rmSync(daemonSocketPath(dir), { force: true }); } catch { /* best effort */ }
   try { fs.rmSync(backendStatePath(dir), { force: true }); } catch { /* best effort */ }
