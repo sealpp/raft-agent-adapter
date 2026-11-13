@@ -33,8 +33,12 @@ function fixture(t, extraEnv = {}) {
     ...extraEnv
   };
   const clients = [];
-  const open = () => {
-    const rpc = new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env });
+  // All adapter clients go through here so the fixture's cleanup hook —
+  // which node:test runs first, in registration order — closes every one of
+  // them before removing the temp dir. On Windows a still-running adapter
+  // holds its cwd and makes rmSync fail with EPERM.
+  const open = (clientEnv = env) => {
+    const rpc = new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env: clientEnv });
     clients.push(rpc);
     return rpc;
   };
@@ -255,13 +259,7 @@ test('a daemon started for a different backend executable is replaced', { timeou
     codebuddyArgs: [exeB, '--acp']
   }));
   const envB = { ...env, RAFT_ADAPTER_CONFIG: configB };
-  const clients = [];
-  const openB = () => {
-    const rpc = new Rpc(process.execPath, [path.join(projectRoot, 'src/adapter.mjs'), 'agent', 'stdio'], { cwd: temp, env: envB });
-    clients.push(rpc);
-    return rpc;
-  };
-  t.after(async () => { for (const rpc of clients) await rpc.close(); });
+  const openB = () => open(envB);
 
   const a = open();
   await a.request('initialize', initializeParams);
