@@ -39,11 +39,10 @@ try {
   }
   // Serialise with live sessions that merge their own discoveries into the
   // catalog; without the lock a refresh could be overwritten by a stale merge.
-  await updateCatalog(config.catalogPath, previous => {
-    const known = previous?.backend === catalog.backend && previous?.models ? previous.models : {};
-    for (const [id, info] of Object.entries(catalog.models)) if (info.efforts?.length) known[id] = info;
-    return { ...catalog, models: known };
-  });
+  // The refresh is authoritative for every model it selected: a model whose
+  // thinking control disappeared must not keep the options an older catalog
+  // recorded for it.
+  await updateCatalog(config.catalogPath, () => catalog);
   console.log(JSON.stringify({ passed: true, backend: backend.id, modelCount: models.length }));
 } finally {
   if (sessionId) {

@@ -46,11 +46,15 @@ export async function updateCatalog(file, merge, { waitMs = 10000 } = {}) {
     await new Promise(resolve => setTimeout(resolve, 50));
     release = tryCatalogLock(dir);
   }
+  // Never write without the lock: a stalled holder could resume and overwrite
+  // this update from its own earlier snapshot.
+  if (!release) throw new Error('Timed out waiting for the model catalog lock');
   try {
     const catalog = merge(readCatalog(file));
     if (catalog) writeCatalog(file, catalog);
+    return catalog ?? null;
   } finally {
-    release?.();
+    release();
   }
 }
 

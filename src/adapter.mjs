@@ -158,7 +158,7 @@ async function persistCatalog(session, { defaultKnown = false } = {}) {
     const info = thinkingInfo(session, backend.thinkingConfigId);
     // updateCatalog re-reads the file under the cross-process lock, so a
     // concurrent agent's discovery is merged rather than overwritten.
-    await updateCatalog(config.catalogPath, previous => {
+    const next = await updateCatalog(config.catalogPath, previous => {
       const next = mergeCatalog(previous, {
         backendId: backend.id,
         key: catalogKey(config.executable, modelOption?.options ?? []),
@@ -170,10 +170,12 @@ async function persistCatalog(session, { defaultKnown = false } = {}) {
       if (sameCatalog(previous, next)) return null;
       return { ...next, generatedAt: new Date().toISOString() };
     });
-    const unknown = entries.filter(entry => !next.models[entry.value]);
-    if (unknown.length && !warnedUnverifiedModels) {
-      warnedUnverifiedModels = true;
-      console.error(`[raft-agent-adapter] ${backend.displayName} offers models without verified thinking options (${unknown.map(entry => entry.value).join(', ')}); run \`npm run models:refresh\` to discover them.`);
+    if (next) {
+      const unknown = entries.filter(entry => !next.models[entry.value]);
+      if (unknown.length && !warnedUnverifiedModels) {
+        warnedUnverifiedModels = true;
+        console.error(`[raft-agent-adapter] ${backend.displayName} offers models without verified thinking options (${unknown.map(entry => entry.value).join(', ')}); run \`npm run models:refresh\` to discover them.`);
+      }
     }
   } catch (error) {
     console.error(`[raft-agent-adapter] Cannot update the ${backend.displayName} model catalog: ${error.message}`);
