@@ -9,7 +9,31 @@ import { spawnSync } from 'node:child_process';
 import { validSessionId, wrapperForSession } from './session-identity.mjs';
 
 const name = process.argv[2];
-const args = process.argv.slice(3);
+// The Windows .cmd shim cannot forward %* through node argv without losing
+// quoting, so it passes cmd's raw argument text in RAFT_CLI_DISPATCH_ARGS.
+function splitArgs(text) {
+  const args = [];
+  let current = '';
+  let quote = null;
+  let started = false;
+  for (const ch of text) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === String.fromCharCode(39)) { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) {
+      if (started || current) { args.push(current); current = ''; started = false; }
+      continue;
+    }
+    current += ch;
+  }
+  if (started || current) args.push(current);
+  return args;
+}
+const rawArgs = process.env.RAFT_CLI_DISPATCH_ARGS;
+const args = rawArgs === undefined ? process.argv.slice(3) : splitArgs(rawArgs);
 if (!['raft', 'slock', 'cont'].includes(name)) {
   console.error('raft: unknown command ' + name);
   process.exit(2);

@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { tryCatalogLock } from './backends.mjs';
 
 // Values accepted by Raft's Grok model parser. Devin's "none" is represented
 // by Raft's Default choice when it is the native model default.
@@ -32,6 +33,25 @@ let catalogSequence = 0;
 
 export function readCatalog(file) {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+}
+
+// Several adapter processes merge into the same catalog from live sessions.
+// The read/merge/write must be one transaction across processes, or two agents
+// selecting different models at once lose each other's thinking options.
+export async function updateCatalog(file, merge, { waitMs = 10000 } = {}) {
+  const dir = path.dirname(file);
+  const deadline = Date.now() + waitMs;
+  let release = tryCatalogLock(dir);
+  while (!release && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    release = tryCatalogLock(dir);
+  }
+  try {
+    const catalog = merge(readCatalog(file));
+    if (catalog) writeCatalog(file, catalog);
+  } finally {
+    release?.();
+  }
 }
 
 export function writeCatalog(file, catalog) {

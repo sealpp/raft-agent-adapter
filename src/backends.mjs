@@ -289,8 +289,10 @@ function lockIsStale(lock) {
   catch (error) { return error.code === 'ESRCH'; }
 }
 
-export function tryInitializeLock(dir, backendId) {
-  const lock = initializeLockPath(dir, backendId);
+// Generic cross-process lock under <dir>/locks/<name>. Returns a release
+// function, or null when another process holds it and it is not stale.
+function acquireLock(dir, name) {
+  const lock = path.join(dir, 'locks', name);
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -299,10 +301,18 @@ export function tryInitializeLock(dir, backendId) {
       return () => { try { fs.rmSync(lock, { recursive: true, force: true }); } catch { /* already released */ } };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      // A probe killed mid-handshake leaves the directory behind.
+      // A process killed mid-operation leaves the directory behind.
       if (!lockIsStale(lock)) return null;
       try { fs.rmSync(lock, { recursive: true, force: true }); } catch { return null; }
     }
   }
   return null;
+}
+
+export function tryInitializeLock(dir, backendId) {
+  return acquireLock(dir, `${backendId}-initialize`);
+}
+
+export function tryCatalogLock(dir) {
+  return acquireLock(dir, 'model-catalog');
 }

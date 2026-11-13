@@ -10,6 +10,14 @@ set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BIN_DIR=${RAFT_ADAPTER_BIN_DIR:-"$HOME/.local/bin"}
+# Refuse before writing anything: a foreign ~/.grok/bin/grok not on PATH would
+# otherwise surface only after the user-bin launcher is already in place.
+GROK_BIN=${GROK_HOME:-"$HOME/.grok"}/bin
+GROK_LINK="$GROK_BIN/grok"
+if { [ -e "$GROK_LINK" ] || [ -L "$GROK_LINK" ]; } && [ "$(readlink -f -- "$GROK_LINK" 2>/dev/null || echo "$GROK_LINK")" != "$(readlink -f -- "$BIN_DIR/grok" 2>/dev/null || echo "$BIN_DIR/grok")" ]; then
+  echo "Another grok exists at $GROK_LINK. Only one grok can own this slot: remove it, or run the other adapter checkout's uninstall.sh." >&2
+  exit 1
+fi
 TARGET="$ROOT/bin/grok"
 LINK="$BIN_DIR/grok"
 DEVIN_EXE=""
@@ -80,8 +88,6 @@ chmod +x "$LINK"
 # Raft also probes ~/.grok/bin/grok directly, independent of the daemon's
 # PATH. Link that well-known candidate to the same trampoline so runtime
 # detection does not depend on how Raft Computer was started.
-GROK_BIN=${GROK_HOME:-"$HOME/.grok"}/bin
-GROK_LINK="$GROK_BIN/grok"
 mkdir -p "$GROK_BIN"
 if [ -e "$GROK_LINK" ] || [ -L "$GROK_LINK" ]; then
   if [ "$(readlink -f -- "$GROK_LINK")" != "$(readlink -f -- "$LINK")" ]; then
